@@ -47,6 +47,11 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+import torch
+import numpy as np
+
+from src.models.mlp import MLP
+from src.data.dataset import pixels_of_image
 
 def load_model(checkpoint: Path, cfg: dict):
     """Rebuild the architecture from the config and load the saved weights.
@@ -54,7 +59,35 @@ def load_model(checkpoint: Path, cfg: dict):
     Put the model in eval mode and disable gradients. Return something callable
     that maps one preprocessed image to one float.
     """
-    raise NotImplementedError("TODO: build the model and load the checkpoint")
+    
+    # A mentett checkpoint betöltése
+    saved = torch.load(
+        checkpoint,
+        map_location="cpu",
+        weights_only=False
+    )
+
+    # A tanításkor használt konfiguráció
+    train_cfg = saved["config"]
+
+    # A modell létrehozása
+    model = MLP(
+        in_dim=saved["in_dim"],
+        hidden=train_cfg["model"]["hidden"],
+        dropout=train_cfg["model"]["dropout"]
+    )
+
+    # A betanított súlyok visszatöltése
+    model.load_state_dict(saved["state_dict"])
+
+    # Kiértékelési mód
+    model.eval()
+
+    # A standardizálás paraméterei
+    model.scaler_mean = saved["scaler_mean"]
+    model.scaler_scale = saved["scaler_scale"]
+
+    return model
 
 
 def preprocess(image_path: Path, cfg: dict):
@@ -64,12 +97,31 @@ def preprocess(image_path: Path, cfg: dict):
     between training and prediction is the single most common reason a good
     validation score turns into a bad leaderboard score.
     """
-    raise NotImplementedError("TODO: load and preprocess a single image")
+    
+    size = cfg["data"]["pixel_size"]
+
+    pixels = pixels_of_image(image_path, size)
+
+    return pixels
 
 
 def predict_one(model, image_path: Path, cfg: dict) -> float:
     """One image in, one number out."""
-    raise NotImplementedError("TODO: run the model, return a float in [0, 1]")
+
+    # Kép feldolgozása
+    pixels = preprocess(image_path, cfg)
+
+    # Standardizálás a tanításkor mentett értékekkel
+    pixels = (pixels - model.scaler_mean) / model.scaler_scale
+
+    # NumPy tömbből PyTorch tensor
+    x = torch.tensor(pixels, dtype=torch.float32).unsqueeze(0)
+
+    # Előrejelzés
+    with torch.no_grad():
+        prediction = model(x).item()
+
+    return float(np.clip(prediction, 0.0, 1.0))
 
 
 def main() -> None:
