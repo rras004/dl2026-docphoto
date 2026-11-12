@@ -121,12 +121,36 @@ def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray,
     set_seed(cfg["seed"])
     tr = cfg["train"]
 
-    scaler = Standardiser().fit(X[train_idx])
-    X_tr = to_tensor(scaler.transform(X[train_idx]), device)
-    X_va = to_tensor(scaler.transform(X[val_idx]), device)
-    y_tr = to_tensor(df[config.TARGET].to_numpy()[train_idx], device)
-    y_va = df[config.TARGET].to_numpy()[val_idx]
-    ok = df["eval_ok"].to_numpy()[val_idx] == 1
+    # Belső tanító- és validációs halmaz
+    inner_train, inner_val = build_splits(
+        df.iloc[train_idx],
+        group_column=cfg["split"]["group_column"],
+        val_fraction=0.2,
+        seed=cfg["split"]["seed"] + 1
+    )
+
+    # A relatív indexeket visszaalakítjuk az eredeti df indexeire
+    inner_train_idx = train_idx[inner_train]
+    inner_val_idx = train_idx[inner_val]
+    
+    # Standardizálás kizárólag a belső tanítóhalmaz alapján
+    scaler = Standardiser().fit(X[inner_train_idx])
+    
+    # Belső tanítóadatok
+    X_tr = to_tensor(scaler.transform(X[inner_train_idx]), device)
+    y_tr = to_tensor(
+        df[config.TARGET].to_numpy()[inner_train_idx], device
+    )
+    
+    # Belső validációs adatok
+    X_va = to_tensor(scaler.transform(X[inner_val_idx]), device)
+    y_va = df[config.TARGET].to_numpy()[inner_val_idx]
+    ok = df["eval_ok"].to_numpy()[inner_val_idx] == 1
+    
+    # Külső validációs adatok – csak a végső értékeléshez
+    X_outer = to_tensor(scaler.transform(X[val_idx]), device)
+    y_outer = df[config.TARGET].to_numpy()[val_idx]
+    ok_outer = df["eval_ok"].to_numpy()[val_idx] == 1
 
     model = MLP(in_dim=X.shape[1], hidden=list(cfg["model"]["hidden"]), dropout=cfg["model"]["dropout"],
                 prior=float(y_tr.mean())).to(device)
@@ -136,7 +160,15 @@ def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray,
 
     tracking.init_run(cfg, tags=tags)
     history, snapshots = [], {}
-    log(f"{cfg['name']}: {len(train_idx)} train / {len(val_idx)} val rows, {X.shape[1]} inputs, "
+    
+    import copy
+    best_val = float("inf")
+    best_epoch = 0
+    best_state = None
+    patience = 10
+    epochs_without_improvement = 0
+    log(f"{cfg['name']}: {len(inner_train_idx)} inner train / "
+        f"{len(inner_val_idx)} inner val / {len(val_idx)} outer val rows, {X.shape[1]} inputs, "
         f"{sum(p.numel() for p in model.parameters()):,} parameters, {device}")
     for epoch in range(1, tr["epochs"] + 1):
         t0 = time.time()
@@ -151,18 +183,73 @@ def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray,
             log(f"epoch {epoch:3d}  train loss {loss:.4f}  train RMSE {train_eval:.4f}  val RMSE {val:.4f}")
         if epoch in (1, tr["epochs"]):
             snapshots[epoch] = predict(model, X_va)
+        # A legjobb modell kiválasztása a belső validáció alapján
+        if np.isfinite(val) and val < best_val:
+            best_val = val
+            best_epoch = epoch
+            best_state = copy.deepcopy(model.state_dict())
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        
+        # Early stopping
+        if epochs_without_improvement >= patience:
+            log(f"Early stopping at epoch {epoch}. Best epoch: {best_epoch}")
+            break
 
+    # A legjobb modell súlyainak visszaállítása
+    if best_state is None:
+        raise RuntimeError("No valid internal validation RMSE was obtained.")
+
+    model.load_state_dict(best_state)
+
+    # Végső értékelés a külső validációs halmazon
+    outer_val_rmse = validate(model, X_outer, y_outer, ok_outer)
+
+    log(f"Best epoch: {best_epoch}")
+    log(f"Best internal val RMSE: {best_val:.4f}")
+    log(f"Outer validation RMSE: {outer_val_rmse:.4f}")
+
+    # A legjobb modell mentése
     ckpt = config.ROOT / "models" / f"{cfg['name']}.pt"
     ckpt.parent.mkdir(exist_ok=True)
-    torch.save({"state_dict": model.state_dict(), "config": cfg, "in_dim": X.shape[1],
-                "scaler_mean": scaler.mean, "scaler_scale": scaler.scale}, ckpt)
-    tracking.log_checkpoint(ckpt, cfg["name"], {"val_rmse": history[-1]["val_rmse"]})
-    tracking.log_metrics({"final_val_rmse": history[-1]["val_rmse"]})
+
+    torch.save({
+        "state_dict": model.state_dict(),
+        "config": cfg,
+        "in_dim": X.shape[1],
+        "scaler_mean": scaler.mean,
+        "scaler_scale": scaler.scale
+    }, ckpt)
+
+    tracking.log_checkpoint(
+        ckpt,
+        cfg["name"],
+        {"val_rmse": outer_val_rmse, "best_epoch": best_epoch}
+    )
+
+    tracking.log_metrics({
+        "final_val_rmse": outer_val_rmse,
+        "best_internal_val_rmse": best_val,
+        "best_epoch": best_epoch
+    })
+
     url = tracking.run_url()
     tracking.finish()
-    return {"history": pd.DataFrame(history), "val_pred": snapshots[tr["epochs"]], "snapshots": snapshots,
-            "model": model, "checkpoint": ckpt, "url": url, "val_index": val_idx, "ok": ok}
 
+    return {
+        "history": pd.DataFrame(history),
+        "val_pred": predict(model, X_outer),
+        "snapshots": snapshots,
+        "model": model,
+        "checkpoint": ckpt,
+        "url": url,
+        "val_index": val_idx,
+        "ok": ok_outer,
+        "best_epoch": best_epoch,
+        "best_internal_val_rmse": best_val,
+        "outer_val_rmse": outer_val_rmse
+    }
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train the MLP from a config")

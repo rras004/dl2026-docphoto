@@ -75,6 +75,14 @@ def tile_dark_max(gray: np.ndarray, threshold: int = 64) -> float:
     """The darkest tile. A shadow across one corner shows here, not in the whole-frame fraction."""
     return float(max((t < threshold).mean() for t in _tiles(gray)))
 
+def illumination_variation(gray: np.ndarray) -> float:
+    """Measures uneven illumination across the image."""
+    tile_means = np.array([
+        np.mean(tile) for tile in _tiles(gray)
+    ])
+
+    return float(np.std(tile_means))
+
 
 FEATURES = {
     "lap_var": laplacian_variance,
@@ -84,6 +92,7 @@ FEATURES = {
     "bright_frac": bright_fraction,
     "tile_lapvar_min": tile_lapvar_min,
     "tile_dark_max": tile_dark_max,
+    "illumination_variation": illumination_variation,
 }
 
 
