@@ -53,6 +53,10 @@ import numpy as np
 from src.models.mlp import MLP
 from src.data.dataset import pixels_of_image
 
+from src.models.build import build_model
+from src.losses import from_state
+from src.data.inputs import preprocess_one
+
 def load_model(checkpoint: Path, cfg: dict):
     """Rebuild the architecture from the config and load the saved weights.
 
@@ -69,6 +73,19 @@ def load_model(checkpoint: Path, cfg: dict):
 
     # A tanításkor használt konfiguráció
     train_cfg = saved["config"]
+
+    # Lab 4: CNN checkpoint betöltése
+    if "in_shape" in saved:
+        loss = from_state(saved["loss_state"])
+        model = build_model(train_cfg, saved["in_shape"], loss)
+        model.load_state_dict(saved["state_dict"])
+        model.eval()
+        model.requires_grad_(False)
+
+        model.checkpoint = saved
+        model.prediction_loss = loss
+
+        return model
 
     # A modell létrehozása
     model = MLP(
@@ -107,6 +124,17 @@ def preprocess(image_path: Path, cfg: dict):
 
 def predict_one(model, image_path: Path, cfg: dict) -> float:
     """One image in, one number out."""
+
+    # Lab 4: CNN predikció
+    if hasattr(model, "prediction_loss"):
+        train_cfg = model.checkpoint["config"]
+        x = preprocess_one(image_path, train_cfg, model.checkpoint)
+
+        with torch.no_grad():
+            output = model(x)
+            prediction = model.prediction_loss.predict(output).item()
+
+        return float(np.clip(prediction, 0.0, 1.0))
 
     # Kép feldolgozása
     pixels = preprocess(image_path, cfg)
