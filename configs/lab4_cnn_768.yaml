@@ -1,0 +1,43 @@
+# Lab 4, the second in-class run: the same network reading 768 px through a stride-4 stem.
+# One change per run. Copy this file per experiment and keep the copy next to
+# the result, so that every number can be traced back to the settings that
+# produced it.
+name: lab4_cnn_768
+seed: 42
+
+data:
+  kind: grey
+  pixel_size: 768           # nine times the pixels of the first run; a 9 pt letter is 8.2 px tall
+
+split:
+  group_column: group_strict
+  val_fraction: 0.2
+  seed: 3                   # the split has its own seed: holds out strict unit 4
+
+model:
+  type: small_cnn           # small_cnn | resnet_small (needs your ResBlock)
+  widths: [8, 16, 32, 64]
+  stem_stride: 4            # the stem still reads every pixel; the maps after it are 192 px (128 in the first run)
+  stem_kernel: 7
+  pool: avgmax              # avg | max | avgmax
+  norm: batch               # batch | group | none
+  dropout: 0.0
+
+train:
+  epochs: 8
+  batch_size: 32
+  lr: 0.002
+  weight_decay: 0.05        # AdamW, on weights only (TASK 3); biases and norms get none
+  clip_norm: 1.0
+  schedule: warmup_cosine   # none | warmup_cosine
+  warmup_frac: 0.1
+  select: last              # last | best (best = chosen on validation: peeking)
+  augment: none             # none | safe | jitter | blur
+  loss: mse
+  amp: none                 # bf16 on a GPU; ignored on a CPU
+  accum_steps: 1
+  log_checkpoint: false     # true uploads the checkpoint to W&B as an artifact
+
+wandb:
+  project: dl2026-docphoto
+  tags: [lab4]
