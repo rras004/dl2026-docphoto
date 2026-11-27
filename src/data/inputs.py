@@ -97,8 +97,14 @@ def preprocess_one(image_path: str | Path, cfg: dict, checkpoint: dict) -> torch
     if kind == "grey":
         s = cfg["data"]["pixel_size"]
         x = pixels_of_image(as_cached(image_path), s).reshape(1, 1, s, s)
+
+        # Match the uint8 representation used by grey_table.
+        x = np.rint(x * 255).astype(np.uint8)
+        x = torch.from_numpy(x).float() / 255.0
+
         sc = checkpoint["scaler"]
-        return torch.from_numpy(((x - sc["mean"]) / sc["scale"]).astype(np.float32))
+        return (x - sc["mean"]) / sc["scale"]
+
     raise ValueError(f"unknown input kind {kind!r}")
 
 
